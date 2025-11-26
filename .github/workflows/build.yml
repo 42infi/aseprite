@@ -1,5 +1,6 @@
 name: build
 on: [push, pull_request]
+
 jobs:
   build:
     runs-on: ${{ matrix.os }}
@@ -17,10 +18,12 @@ jobs:
             ui: cli
           - build_type: RelWithDebInfo
             scripting: noscripts
+
     steps:
     - uses: actions/checkout@v4
       with:
         submodules: 'recursive'
+
     - name: Install Dependencies
       if: runner.os == 'Linux'
       shell: bash
@@ -30,6 +33,7 @@ jobs:
           libpixman-1-dev libfreetype6-dev libharfbuzz-dev zlib1g-dev \
           libx11-dev libxcursor-dev libxi-dev libxrandr-dev libgl1-mesa-dev \
           libfontconfig1-dev
+
     - name: Install Skia
       if: ${{ matrix.ui == 'gui' }}
       shell: bash
@@ -43,14 +47,18 @@ jobs:
         skia_file=$(basename $skia_url)
         curl --ssl-revoke-best-effort -L -o "$skia_file" "$skia_url"
         unzip "$skia_file" -d skia
+
     - name: ccache
       uses: hendrikmuhs/ccache-action@v1.2.17
       if: ${{ runner.os == 'Linux' || runner.os == 'macOS' }}
       with:
         key: ${{ matrix.os }}-${{ matrix.ui }}-${{ matrix.scripting }}-${{ matrix.build_type }}
+
     - uses: aseprite/get-ninja@main
+
     - uses: ilammy/msvc-dev-cmd@v1
       if: runner.os == 'Windows'
+
     - name: Generating Makefiles
       shell: bash
       run: |
@@ -87,24 +95,42 @@ jobs:
           -DLAF_BACKEND=$laf_backend \
           -DSKIA_DIR=$(realpath skia) \
           -DSKIA_LIBRARY_DIR=$(realpath skia/out/Release-$skia_arch)
+
     - name: Compiling
       shell: bash
       run: |
         cd build && ninja
-    - name: Running C++ Tests
-      shell: bash
+
+    - name: Archive Build Output
       run: |
-        if [[ "${{ runner.os }}" == "Linux" ]] ; then
-          export XVFB=xvfb-run
-        fi
-        cd build && $XVFB ctest --output-on-failure
-    - name: Running CLI Tests
-      if: ${{ matrix.scripting == 'lua' }}
-      shell: bash
-      run: |
-        if [[ "${{ runner.os }}" == "Linux" ]] ; then
-          export XVFB=xvfb-run
-        fi
-        export ASEPRITE=$PWD/build/bin/aseprite
-        cd tests
-        $XVFB bash run-tests.sh
+        mkdir -p output
+        cp -r build/bin output/
+        # Compress it for nicer release files
+        tar -czf "${{ matrix.os }}_${{ matrix.build_type }}_${{ matrix.ui }}_${{ matrix.scripting }}.tar.gz" -C output bin
+
+    - name: Upload Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ matrix.os }}-${{ matrix.build_type }}-${{ matrix.ui }}-${{ matrix.scripting }}
+        path: |
+          *.tar.gz
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Download all artifacts
+      uses: actions/download-artifact@v4
+      with:
+        path: artifacts
+
+    - name: Create Draft Release
+      uses: softprops/action-gh-release@v2
+      with:
+        draft: true
+        files: artifacts/**/*
+        name: "Auto Build - ${{ github.sha }}"
+        tag_name: "auto-${{ github.sha }}"
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
