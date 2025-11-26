@@ -1,5 +1,9 @@
-name: build
-on: [push, pull_request]
+name: release-build
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
 
 jobs:
   build:
@@ -8,25 +12,17 @@ jobs:
       fail-fast: false
       matrix:
         os: [windows-latest, macos-latest, ubuntu-latest]
-        build_type: [RelWithDebInfo, Debug]
-        ui: [gui, cli]
-        scripting: [lua, noscripts]
-        exclude:
-          - build_type: Debug
-            ui: gui
-          - build_type: RelWithDebInfo
-            ui: cli
-          - build_type: RelWithDebInfo
-            scripting: noscripts
+        ui: [gui, cli]     # build GUI + CLI separately
+        scripting: [lua]   # full scripting support
+        build_type: [Release]
 
     steps:
     - uses: actions/checkout@v4
       with:
-        submodules: 'recursive'
+        submodules: recursive
 
-    - name: Install Dependencies
+    - name: Install Dependencies (Linux)
       if: runner.os == 'Linux'
-      shell: bash
       run: |
         sudo apt-get update -qq
         sudo apt-get install -y \
@@ -34,9 +30,8 @@ jobs:
           libx11-dev libxcursor-dev libxi-dev libxrandr-dev libgl1-mesa-dev \
           libfontconfig1-dev
 
-    - name: Install Skia
+    - name: Install Skia (GUI only)
       if: ${{ matrix.ui == 'gui' }}
-      shell: bash
       run: |
         if [[ "${{ runner.os }}" == "Windows" ]] ; then
           this_dir=$(cygpath "${{ github.workspace }}")
@@ -48,39 +43,29 @@ jobs:
         curl --ssl-revoke-best-effort -L -o "$skia_file" "$skia_url"
         unzip "$skia_file" -d skia
 
-    - name: ccache
-      uses: hendrikmuhs/ccache-action@v1.2.17
-      if: ${{ runner.os == 'Linux' || runner.os == 'macOS' }}
-      with:
-        key: ${{ matrix.os }}-${{ matrix.ui }}-${{ matrix.scripting }}-${{ matrix.build_type }}
-
     - uses: aseprite/get-ninja@main
 
     - uses: ilammy/msvc-dev-cmd@v1
       if: runner.os == 'Windows'
 
-    - name: Generating Makefiles
-      shell: bash
+    - name: Configure CMake
       run: |
-        if [[ "${{ runner.os }}" == "Windows" ]] ; then
-          export enable_ccache=off
+        if [[ "${{ runner.os }}" == "Windows" ]]; then
+          enable_ccache=off
         else
-          export enable_ccache=on
+          enable_ccache=on
         fi
 
-        if [[ "${{ matrix.ui }}" == "gui" ]] ; then
+        # GUI or CLI
+        if [[ "${{ matrix.ui }}" == "gui" ]]; then
           export laf_backend=skia
         else
           export laf_backend=none
         fi
 
-        if [[ "${{ matrix.scripting }}" == "lua" ]] ; then
-          export enable_scripting=on
-        else
-          export enable_scripting=off
-        fi
+        export enable_scripting=on
 
-        if [[ "${{ runner.os }}" == "macOS" ]] ; then
+        if [[ "${{ runner.os }}" == "macOS" ]]; then
           export skia_arch=arm64
         else
           export skia_arch=x64
@@ -89,39 +74,40 @@ jobs:
         cmake -S . -B build -G Ninja \
           -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
           -DCMAKE_OSX_DEPLOYMENT_TARGET=10.14 \
-          -DENABLE_TESTS=ON \
+          -DENABLE_TESTS=OFF \
           -DENABLE_SCRIPTING=$enable_scripting \
           -DENABLE_CCACHE=$enable_ccache \
           -DLAF_BACKEND=$laf_backend \
           -DSKIA_DIR=$(realpath skia) \
           -DSKIA_LIBRARY_DIR=$(realpath skia/out/Release-$skia_arch)
 
-    - name: Compiling
-      shell: bash
+    - name: Build
       run: |
         cd build && ninja
 
-    - name: Archive Build Output
+    - name: Package ZIP
+      shell: bash
       run: |
-        mkdir -p output
-        cp -r build/bin output/
-        # Compress it for nicer release files
-        tar -czf "${{ matrix.os }}_${{ matrix.build_type }}_${{ matrix.ui }}_${{ matrix.scripting }}.tar.gz" -C output bin
+        mkdir out
+        cp -r build/bin out/
 
-    - name: Upload Artifact
+        zipname="aseprite-${{ matrix.os }}-${{ matrix.ui }}.zip"
+
+        cd out
+        zip -r "../$zipname" bin
+
+    - name: Upload artifact
       uses: actions/upload-artifact@v4
       with:
-        name: ${{ matrix.os }}-${{ matrix.build_type }}-${{ matrix.ui }}-${{ matrix.scripting }}
-        path: |
-          *.tar.gz
+        name: aseprite-${{ matrix.os }}-${{ matrix.ui }}
+        path: aseprite-${{ matrix.os }}-${{ matrix.ui }}.zip
 
   release:
     needs: build
     runs-on: ubuntu-latest
 
     steps:
-    - name: Download all artifacts
-      uses: actions/download-artifact@v4
+    - uses: actions/download-artifact@v4
       with:
         path: artifacts
 
@@ -129,8 +115,8 @@ jobs:
       uses: softprops/action-gh-release@v2
       with:
         draft: true
+        name: "Release Build – ${{ github.sha }}"
+        tag_name: "release-${{ github.sha }}"
         files: artifacts/**/*
-        name: "Auto Build - ${{ github.sha }}"
-        tag_name: "auto-${{ github.sha }}"
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
